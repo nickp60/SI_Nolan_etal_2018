@@ -1,0 +1,768 @@
+---
+title: "Simulated piecewise data"
+author: "Leighton Pritchard"
+date: "27/04/2018"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(dplyr)
+library(ggplot2)
+library(rstan)
+library(stringr)
+library(tidyr)
+```
+
+## Introduction
+
+To analyse the Nolan *et al.* paper date, we propose to use piecewise regression to estimate the effect of changing treatment regime on the level/amount of *E. coli* and other bacteria in slurry.
+
+The structural elements of the data leading us to use this approach include:
+
+- there are a small number of well-spaced timepoints
+- there is a clear distinction between rapid bacterial population decrease (early) and a gradual decrease (late), though we do not know where this transition lies
+
+## Proposed generative model
+
+We consider the population to be represented by a piecewise function:
+
+$$y = \bigg \{ \begin{array}{cccl} m_1 x & + & c_1 & , \textrm{if } x <= k \\ m_2 x & + & c_2 & , \textrm{if } x > k\end{array} $$
+
+where
+
+- $y$ is the measured amount of bacteria
+- $x$ is the time since experiment start
+- $k$ is the value of $x$ where the regime changes from early to late stage
+- $m_1$ and $c_1$ are the slope and intercept for the early stage linear relationship
+- $m_2$ and $c_2$ are the slope and intercept for the late stage linear relationship
+
+## Generating a dataset
+
+To generate the dataset, we first set parameters:
+
+```{r}
+k = 5          # regime changes after 5d
+m_1 = -0.6e6   # early stage decay
+m_2 = -0.01e6   # late stage decay
+c_1 = 5e6      # early stage intercept
+c_2 = 4e6      # late stage intercept
+```
+
+Then we can create a function that returns the deterministic amount of bacteria given the time since the experiment started:
+
+```{r}
+# Function that takes the timepoint, and returns level of bacteria according to our model
+baclevel = function(t) {
+  if (t <= k) {
+    return(m_1 * t + c_1)
+  } else {
+    return(m_2 * t + c_2)
+  }
+}
+```
+
+We can test this out:
+
+```{r}
+df = data.frame(time=seq(0,28,7))
+df$bac = apply(df, 1, baclevel)
+p = ggplot(df, aes(x=time, y=bac))
+p + geom_line() + geom_point()
+```
+
+Note, at this point:
+
+- the relationship is deterministic: for each timepoint there's a definite output bacterial level and there is no uncertainty in the measurement
+- the threshold timepoint is not represented by a datapoint (it occurs somwhere between the first and second datapoints)
+- there is a clear two-step piecewise pattern in the data *but it is not an accurate representation of the simple underlying model* because of the unknown breakpoint between stages
+
+## Adding some uncertainty
+
+We can introduce two random elements that model basic sources of uncertainty in our experimental measurements:
+
+- measurement error: this is typically assumed to be Normally distributed with a mean of zero
+- timing error: the measurements are not made at *exactly* 7d, 14d, etc. - so we can introduce a bit of uncertainty here, too
+
+We choose to introduce this uncertainty by creating a new function to return simulated values:
+
+```{r}
+# This function returns a deterministic value of bacterial level for an input timepoint
+# However, it adds two sources of randomness: measurement error, and timing error
+baclevel_err = function(t) {
+  t = max(0, t + rnorm(1, 0, 1))     # add random error to timing
+  err_m = rnorm(1, 0, 2e6)
+  if (t <= k) {
+    return(m_1 * t + c_1) + err_m
+  } else {
+    return(m_2 * t + c_2) + err_m
+  }
+}
+```
+
+We can plot the effect that this has:
+
+```{r}
+df$err = lapply(df$time, baclevel_err)
+data = gather(df, key="run", value="bac", c(bac, err))
+data$run = as.factor(data$run)
+data$bac = as.numeric(data$bac)
+p = ggplot(data, aes(x=time, y=bac, color=run))
+p + geom_line() + geom_point()
+```
+
+Note that we are still measuring the data at the same timepoints, with the same underlying model, but that uncertainty around our measurement times, and measured values generates differences between runs. We have full control over the scale of these (random) differences.
+
+We can also add uncertainty around the "knot", or threshold between the two regimes:
+
+```{r}
+# This function returns a deterministic value of bacterial level for an input timepoint
+# It adds two sources of measured randomness: measurement error, and timing error
+# It adds a further source of randomness from the system: the timing of the switch between
+# fast and slow decay may vary
+baclevel_err_knot = function(t) {
+  t = max(0, t + rnorm(1, 0, 1))     # add random error to timing
+  err_m = rnorm(1, 0, 2e6)
+  err_knot = rnorm(1, 0, 1)
+  if (t <= k + err_knot) {
+    return(m_1 * t + c_1) + err_m
+  } else {
+    return(m_2 * t + c_2) + err_m
+  }
+}
+
+df$err_knot = lapply(df$time, baclevel_err_knot)
+data = gather(df, key="run", value="bac", c(bac, err, err_knot))
+data$run = as.factor(data$run)
+data$bac = as.numeric(data$bac)
+p = ggplot(data, aes(x=time, y=bac, color=run))
+p + geom_line() + geom_point()
+```
+
+Finally, we'll add some uncertainty around the parameters themselves:
+
+```{r}
+# This function returns a deterministic value of bacterial level for an input timepoint
+# It adds two sources of measured randomness: measurement error, and timing error
+# It adds a further source of randomness from the system: the timing of the switch between
+# fast and slow decay may vary
+# Each model parameter is also subject to Normal random effects with sd 2% of parameter size
+baclevel_random = function(t) {
+  t = max(0, t + rnorm(1, 0, 1))     # add random error to timing
+  err_m = rnorm(1, 0, 2e6)
+  err_knot = rnorm(1, 0, 1)
+  if (t <= k + err_knot) {
+    return(m_1 * rnorm(1, 1, 0.02) * t + c_1 * rnorm(1, 1, 0.02)) + err_m
+  } else {
+    return(m_2 * rnorm(1, 1, 0.02) * t + c_2 * rnorm(1, 1, 0.02)) + err_m
+  }
+}
+
+df$err_params = lapply(df$time, baclevel_random)
+data = gather(df, key="run", value="bac", c(bac, err, err_knot, err_params))
+data$run = as.factor(data$run)
+data$bac = as.numeric(data$bac)
+p = ggplot(data, aes(x=time, y=bac, color=run))
+p + geom_line() + geom_point()
+```
+
+We now have a simple function, capable of giving us noisy-looking data that nevertheless corresponds to generation by the simple piecewise model with some noise placed appropriately.
+
+## Generating a dataset
+
+To generate a test dataset, we'll fix the pseudorandom number seed and produce a new dataframe with three runs from the same function. But first, we'll create a helper function:
+
+```{r}
+# Function to plot a dataframe with columns:
+# time: timepoint
+# bac: measure of bacterial level
+# run: name of the run
+plotdata = function(df) {
+  p = ggplot(df, aes(x=time, y=bac, color=run))
+  p = p + geom_line() + geom_point()
+  return(p)
+}
+```
+
+Now we'll make the dataset and plot it:
+
+```{r}
+set.seed(123456)
+simdata = data.frame(time=seq(0,28,7))
+runs = c("run1", "run2", "run3")
+for (run in runs) {
+  simdata[run] = as.numeric(lapply(simdata$time, baclevel_random))
+}
+simdata = gather(simdata, key="run", value="bac", runs)
+plotdata(simdata)
+```
+
+## Fitting the dataset
+
+We're going to work our way up to using `STAN` to help estimate parameters of our model:
+
+- $m_1$: early stage slope
+- $m_2$: late stage slope
+- $c_1$: early stage intercept
+- $c_2$: late stage intercept
+- $k$: threshold 
+
+We could jump straight in to this, but it's worth building up our thought process and approach in sections.
+
+### Simple linear regression
+
+To begin with, we'll try fitting a simple linear regression to the complete dataset, so we can see how our data will fit with the modelling process. First, we define the model code:
+
+```{r}
+model1_code = "
+data {
+  int<lower=0> N;          // total number of datapoints
+  vector[N] y;             // bacterial counts
+  vector[N] t;             // timepoints
+}
+parameters {
+  real m;                  // slope
+  real c;                  // intercept
+  real<lower=0> sigma;     // measurement error
+}
+transformed parameters {
+  vector[N] y_hat;         // the *real* measured value, without measurement error
+
+  for (i in 1:N)
+    y_hat[i] = m * t[i]+ c;           // simple linear fit
+}
+model {
+  y ~ normal(y_hat, sigma);           // fit with error
+}
+"
+```
+
+Next, we define the data to be passed to `STAN`:
+
+```{r}
+stan_data = list(N = nrow(simdata),
+                 y = simdata$bac,
+                 t = simdata$time)
+```
+
+And then we can fit the model:
+
+```{r, results='hide'}
+fit_model1 = stan(model_code = model1_code,
+                  data = stan_data,
+                  iter = 2000,
+                  chains = 4)
+```
+
+Then inspect the fitted parameters:
+
+```{r}
+summary_model1 = summary(fit_model1, pars=c("m", "c"), probs = c(0.1, 0.9))
+m_model1 = summary_model1$summary[1]
+c_model1 = summary_model1$summary[2]
+summary_model1$summary
+```
+
+This should suggest that a simple linear fit is $y \approx -37700 t + 4.5e6$, with an `Rhat` that suggests we're near convergence, and we can view the fit overlaid on the data:
+
+```{r}
+plotdata(simdata) + geom_abline(intercept=c_model1, slope=m_model1, colour="purple")
+```
+
+This isn't a great fit to our data, but it's pretty clear that we've got a fairly decent regression line.
+
+### Piecewise linear regression
+
+One of the reasons our simple model doesn't describe our data well is because it's not a good model for our data. But we know how to fix that, because we know that our model has two linear relationships that meet at some point. So we need to modify our code to show this:
+
+```{r}
+model2_code = "
+data {
+  int<lower=0> N;           // total number of datapoints
+  vector[N] y;              // bacterial counts
+  vector[N] t;              // timepoints
+}
+parameters {
+  real m1;                  // slope - early stage
+  real c1;                  // intercept - early stage
+  real m2;                  // slope - late stage
+  real c2;                  // intercept - late stage
+  real<lower=0> sigma;      // measurement error
+}
+transformed parameters {
+  vector[N] y_hat;         // the *real* measured value, without measurement error
+
+  for (i in 1:N) {
+    if (t[i] <= 7) {                      // very strict assumption about the knot timing
+      y_hat[i] = m1 * t[i]+ c1;           // simple linear fit, early stage
+    } else {
+      y_hat[i] = m2 * t[i] +c2;           // simple linear fit, late stage
+    }
+  }
+}
+model {
+  y ~ normal(y_hat, sigma);               // fit with error
+}
+"
+```
+
+And then we can fit this model to the same data as before:
+
+```{r, results='hide'}
+fit_model2 = stan(model_code = model2_code,
+                  data = stan_data,
+                  iter = 2000,
+                  chains = 4)
+```
+
+We inspect the fitted parameters:
+
+```{r}
+summary_model2 = summary(fit_model2, pars=c("m1", "c1", "m2", "c2"), probs = c(0.1, 0.9))
+m1_model2 = summary_model2$summary[1]
+c1_model2 = summary_model2$summary[2]
+m2_model2 = summary_model2$summary[3]
+c2_model2 = summary_model2$summary[4]
+summary_model2$summary
+```
+
+And plot the new fits:
+
+```{r}
+plotdata(simdata) +
+  geom_abline(intercept=c1_model2, slope=m1_model2, colour="purple", linetype="longdash") + 
+  geom_abline(intercept=c2_model2, slope=m2_model2, colour="orange", linetype="longdash")
+```
+
+We can see that the two regimes are fit reasonably well - graphically, at least - although they don't exactly match the parameters we set.
+
+There's a good reason for this failure to match our parameters: with the structure of the model above, we require two datapoints to be able to infer the slope for either regime. As the knot timing we defined was 5d, we cannot specify this time in the model and obtain a fit - it also means we cannot leave that parameter unspecified and obtain an earlier estimate than 7d; our only recourse is to **repeat the experiment with more measurements at earlier timepoints**. 
+
+Even so, we'll explore this scenarion briefly.
+
+### Inaccessible parameter: the regime transition (knot)
+
+#### Set the correct timepoint for transition
+
+We define our first model with a very strict prior: we set the transition point to 5d (the correct setting) and then try to fit the model:
+
+```{r, results="hide"}
+model3_code = "
+data {
+  int<lower=0> N;           // total number of datapoints
+  vector[N] y;              // bacterial counts
+  vector[N] t;              // timepoints
+}
+parameters {
+  real m1;                  // slope - early stage
+  real c1;                  // intercept - early stage
+  real m2;                  // slope - late stage
+  real c2;                  // intercept - late stage
+  real<lower=0> sigma;      // measurement error
+}
+transformed parameters {
+  vector[N] y_hat;         // the *real* measured value, without measurement error
+
+  for (i in 1:N) {
+    if (t[i] <= 5) {                      // very strict assumption about the knot timing
+      y_hat[i] = m1 * t[i]+ c1;           // simple linear fit, early stage
+    } else {
+      y_hat[i] = m2 * t[i] +c2;           // simple linear fit, late stage
+    }
+  }
+}
+model {
+  y ~ normal(y_hat, sigma);               // fit with error
+}
+"
+fit_model3 = stan(model_code = model3_code,
+                  data = stan_data,
+                  iter = 2000,
+                  chains = 4)
+```
+
+We try to access the parameters:
+
+```{r}
+summary_model3 = summary(fit_model3, pars=c("m1", "c1", "m2", "c2"), probs = c(0.1, 0.9))
+m1_model3 = summary_model2$summary[1]
+c1_model3 = summary_model2$summary[2]
+m2_model3 = summary_model2$summary[3]
+c2_model3 = summary_model2$summary[4]
+summary_model3$summary
+```
+
+The `Rhat` value for `m1` should indicate that there was no convergence. This is because we could not use more than a single timepoint to estimate that slope, and therefore *any slope was possible*.
+
+#### Estimate the timepoint for transition
+
+We define our second model with a free parameter choice for the transition between early and late regimes:
+
+```{r, results="hide"}
+model4_code = "
+data {
+  int<lower=0> N;           // total number of datapoints
+  vector[N] y;              // bacterial counts
+  vector[N] t;              // timepoints
+}
+parameters {
+  real m1;                  // slope - early stage
+  real c1;                  // intercept - early stage
+  real m2;                  // slope - late stage
+  real c2;                  // intercept - late stage
+  real k;                   // the transition timepoint
+  real<lower=0> sigma;      // measurement error
+}
+transformed parameters {
+  vector[N] y_hat;         // the *real* measured value, without measurement error
+
+  for (i in 1:N) {
+    if (t[i] <= k) {                      // very strict assumption about the knot timing
+      y_hat[i] = m1 * t[i]+ c1;           // simple linear fit, early stage
+    } else {
+      y_hat[i] = m2 * t[i] +c2;           // simple linear fit, late stage
+    }
+  }
+}
+model {
+  y ~ normal(y_hat, sigma);               // fit with error
+}
+"
+fit_model4 = stan(model_code = model4_code,
+                  data = stan_data,
+                  iter = 500,
+                  chains = 4)
+```
+
+We try to access the parameters:
+
+```{r}
+summary_model4 = summary(fit_model4, pars=c("m1", "c1", "m2", "c2", "k"), probs = c(0.1, 0.9))
+m1_model4 = summary_model2$summary[1]
+c1_model4 = summary_model2$summary[2]
+m2_model4 = summary_model2$summary[3]
+c2_model4 = summary_model2$summary[4]
+k_model4 = summary_model2$summary[5]
+summary_model4$summary
+```
+
+Now we should see that there is no convergence at all. There are severa; things going on here, to cause this:
+
+- the late stage data fits far better if the 7d timepoint is included, which forces the transition point earlier than 7d, but this causes huge uncertainty in the early stage slope
+- to have a converged estimate for the early stage slope, we need to include 0d and 7d timepoints (at a minimum), and so set the transition point at 7d or later. This is not easy for `STAN` to find without a prior constraint.
+
+So, let's add a prior to $k$ and see if it might help. For this, we'll define a Normal distribution with `mean=5` and `sd=3`: 
+
+```{r, results="hide"}
+model5_code = "
+data {
+  int<lower=0> N;           // total number of datapoints
+  vector[N] y;              // bacterial counts
+  vector[N] t;              // timepoints
+}
+parameters {
+  real m1;                  // slope - early stage
+  real c1;                  // intercept - early stage
+  real m2;                  // slope - late stage
+  real c2;                  // intercept - late stage
+  real k;                   // the transition timepoint
+  real<lower=0> sigma;      // measurement error
+}
+transformed parameters {
+  vector[N] y_hat;         // the *real* measured value, without measurement error
+
+  for (i in 1:N) {
+    if (t[i] <= k) {                      // very strict assumption about the knot timing
+      y_hat[i] = m1 * t[i]+ c1;           // simple linear fit, early stage
+    } else {
+      y_hat[i] = m2 * t[i] +c2;           // simple linear fit, late stage
+    }
+  }
+}
+model {
+  k ~ normal(7, 3);                       // prior on transition timepoint
+
+  y ~ normal(y_hat, sigma);               // fit with error
+}
+"
+fit_model5 = stan(model_code = model5_code,
+                  data = stan_data,
+                  iter = 2000,
+                  chains = 4)
+```
+
+We get numerous warnings about our model fit, but we can access the parameters:
+
+```{r}
+summary_model5 = summary(fit_model5, pars=c("m1", "c1", "m2", "c2", "k"), probs = c(0.1, 0.9))
+m1_model5 = summary_model5$summary[1]
+c1_model5 = summary_model5$summary[2]
+m2_model5 = summary_model5$summary[3]
+c2_model5 = summary_model5$summary[4]
+k_model5 = summary_model5$summary[5]
+summary_model5$summary
+```
+
+This gives a surprisingly good estimate for $k$, for both intercepts, and for the late-stage slope. However, the early-stage slope still does not converge, and this is because we don't have enough datapoints to estimate the early stage slope when the correct transition point is chosen. 
+
+```{r}
+plotdata(simdata) +
+  geom_abline(intercept=c1_model5, slope=m1_model5, colour="purple", linetype="longdash") + 
+  geom_abline(intercept=c2_model5, slope=m2_model5, colour="orange", linetype="longdash")
+```
+
+## Fitting to real data
+
+We can fit this piecewise linear model to the *E. coli* data. 
+
+### Loading/cleaning data
+
+First we load and clean the data:
+
+```{r}
+datafile="../processeddata/2018-03-09/aggregated_clean_summarized.csv"
+data = read.table(datafile, header=TRUE, sep=",")
+
+# Replicate labels should be factors, not integers
+data$biorep = as.factor(data$biorep)
+data$techrep = as.factor(data$techrep)
+
+# We will leave in the interstitial days, as the more data the better
+#data = data %>% filter(day != 2 & day != 5 & day != 9)
+
+# Remove the feedstock data, as that is still unneeded for modelling
+#  That said, the feedstock values serve as a nice before/after comparison
+data = data %>% filter(treatment != "FS")
+
+# Rename techrep column
+names(data) = c("day", "treatment", "replicate", "measurement", "measure", "value")
+
+# Map the biorep column to a new column called vessel, where each vessel is a
+# unique combination of timepoint, biorep, and treatment.  This helps reflects which values are repeated measures over time, and which are the result of destructive sampling. 
+data = data %>%
+  mutate(vessel = paste(treatment, replicate, day, sep=""))
+  
+# Set the chamber for the 10L treatments to be the biorep value
+data[data$treatment == "10L",] = data %>%
+  filter(treatment == "10L") %>%
+  mutate(vessel=replicate)
+
+# Make the chamber column a factor
+data$vessel = as.factor(data$vessel)
+
+# Add P0 index (small vessel, applies to all P0-P4 treatments, not 10L)
+# I'm going to rename this "small", just to avoid the confusion I experienced at first
+data$small = !data$treatment %in% c("10L")
+
+# Add index for each pasteurisation treatment
+data$P1 = data$treatment == "P1"
+data$P2 = data$treatment == "P2"
+data$P3 = data$treatment == "P3"
+data$P4 = data$treatment == "P4"
+
+# Replace bacterial measurement names
+data$measure = data$measure %>%
+  str_replace("E. coli", "ecoli") %>%
+  str_replace("Enterococci", "enterococci") %>%
+  str_replace("Coliforms", "coliforms")
+
+# Convert bacterial counts to logs
+data$logvalue = log10(data$value + 2)
+```
+
+Next we restrict the dataset to coliforms, and put data into the form needed for `STAN`:
+
+```{r}
+coliform_data = data %>% filter(measure == "coliforms")
+coliform_stan_data = list(N = nrow(coliform_data),
+                          y = coliform_data$logvalue,
+                          t = coliform_data$day)
+```
+
+### Fitting simple piecewise linear model
+
+We'll use `model2` to fit the data - estimating two intercepts and slopes, setting a hard threshold at 7d:
+
+```{r, results='hide'}
+coliform_model2 = stan(model_code = model2_code,
+                       data = coliform_stan_data,
+                       iter = 2000,
+                       chains = 4)
+```
+
+```{r}
+summary_coliform2 = summary(coliform_model2, pars=c("m1", "c1", "m2", "c2"), probs = c(0.1, 0.9))
+m1_coliform2 = summary_coliform2$summary[1]
+c1_coliform2 = summary_coliform2$summary[2]
+m2_coliform2 = summary_coliform2$summary[3]
+c2_coliform2 = summary_coliform2$summary[4]
+summary_coliform2$summary
+```
+
+Then plot the outcome:
+
+```{r}
+p = ggplot(coliform_data, aes(x=day, y=logvalue, colour=treatment))
+p = p + geom_point()
+p + geom_abline(intercept=c1_coliform2, slope=m1_coliform2, colour="purple", linetype="longdash") + 
+    geom_abline(intercept=c2_coliform2, slope=m2_coliform2, colour="orange", linetype="longdash")
+```
+
+This isn't an awful fit, though it's clear that the `P4` data is affecting our overall late period intercept
+
+### Fitting simple piecewise linear model with prior on $k$ (threshold timepoint)
+
+We'll use `model5` to fit the data - estimating two intercepts and slopes, setting a moderately strict prior for the threshold, with mean at 7d, and sd of 3:
+
+```{r, results='hide'}
+coliform_model5 = stan(model_code = model5_code,
+                       data = coliform_stan_data,
+                       iter = 2000,
+                       chains = 4)
+```
+
+```{r}
+summary_coliform5 = summary(coliform_model5, pars=c("m1", "c1", "m2", "c2", "k"), probs = c(0.1, 0.9))
+m1_coliform5 = summary_coliform5$summary[1]
+c1_coliform5 = summary_coliform5$summary[2]
+m2_coliform5 = summary_coliform5$summary[3]
+c2_coliform5 = summary_coliform5$summary[4]
+k_coliform5 = summary_coliform5$summary[5]
+summary_coliform5$summary
+```
+
+Then plot the outcome:
+
+```{r}
+p = ggplot(coliform_data, aes(x=day, y=logvalue, colour=treatment))
+p = p + geom_point()
+p + geom_abline(intercept=c1_coliform5, slope=m1_coliform5, colour="purple", linetype="longdash") + 
+    geom_abline(intercept=c2_coliform5, slope=m2_coliform5, colour="orange", linetype="longdash")
+```
+
+This, however, *is* an awful fit. So we choose to proceed initially with the hardcoded transition point at 7d.
+
+### Treatment-wise estimation of intercepts and slopes
+
+We're going to attempt a treatment-wise fit on the 'real' data. This means we have to introduce a new piece of data into the `STAN` model:
+
+- `trt`: the treatment (as a factor)
+- `Ntrt`: the number of treatments (as an integer)
+
+As a result, we have to change our `m1`, `m2`, `c1` and `c2` parameters from `real` to `vector`, and index these parameters accordingly in the transformed parameters as `vector[Ntrt]` and so on:
+
+```{r}
+model6_code = "
+data {
+  int<lower=0> N;           // total number of datapoints
+  int<lower=0> Ntrt;        // total number of treatments
+  vector[N] y;              // bacterial counts
+  vector[N] t;              // timepoints
+  int<lower=1, upper=Ntrt> trt[N];            // treatments
+}
+parameters {
+  vector[Ntrt] m1;                  // slope - early stage
+  vector[Ntrt] c1;                  // intercept - early stage
+  vector[Ntrt] m2;                  // slope - late stage
+  vector[Ntrt] c2;                  // intercept - late stage
+  real<lower=0> sigma;      // measurement error
+}
+transformed parameters {
+  vector[N] y_hat;         // the *real* measured value, without measurement error
+
+  for (i in 1:N) {
+    if (t[i] <= 7) {                      // hardcode transition timepoint
+      y_hat[i] = m1[trt[i]] * t[i]+ c1[trt[i]];           // simple linear fit, early stage
+    } else {
+      y_hat[i] = m2[trt[i]] * t[i] +c2[trt[i]];           // simple linear fit, late stage
+    }
+  }
+}
+model {
+  y ~ normal(y_hat, sigma);               // fit with error
+}
+"
+```
+
+We modify the passed data:
+
+```{r}
+coliform_data$treatment = droplevels(coliform_data$treatment, "FS")
+coliform_trt_stan_data = list(N = nrow(coliform_data),
+                              y = coliform_data$logvalue,
+                              t = coliform_data$day,
+                              trt = as.integer(coliform_data$treatment),
+                              Ntrt = nlevels(coliform_data$treatment))
+```
+
+Then we can fit the model:
+
+```{r, results='hide'}
+coliform_model6 = stan(model_code = model6_code,
+                       data = coliform_trt_stan_data,
+                       iter = 2000,
+                       chains = 4)
+```
+
+And inspect the fit:
+
+```{r}
+summary_coliform6 = summary(coliform_model6, pars=c("m1", "c1", "m2", "c2"), probs = c(0.1, 0.9))
+m1_coliform6_10L = summary_coliform6$summary[1]
+c1_coliform6_10L = summary_coliform6$summary[7]
+m2_coliform6_10L = summary_coliform6$summary[13]
+c2_coliform6_10L = summary_coliform6$summary[19]
+m1_coliform6_P3 = summary_coliform6$summary[5]
+c1_coliform6_P3 = summary_coliform6$summary[11]
+m2_coliform6_P3 = summary_coliform6$summary[17]
+c2_coliform6_P3 = summary_coliform6$summary[23]
+summary_coliform6$summary
+```
+
+This gives reasonable convergence, and we can inspect the fitted parameters:
+
+```{r}
+# Plot the early stage slopes
+plot(coliform_model6, pars=c("m1"), show_density=TRUE)
+
+# Plot the late stage slopes
+plot(coliform_model6, pars=c("m2"), show_density=TRUE)
+
+# Plot the early stage intercepts
+plot(coliform_model6, pars=c("c1"), show_density=TRUE)
+
+# Plot the late stage intercepts
+plot(coliform_model6, pars=c("c2"), show_density=TRUE)
+```
+
+From these density plots we can tentatively conclude that:
+
+- the early stage slopes for `P0` and `10L` do not differ, so there is no influence on initial rate of loss of coliforms due to vessel size
+- the early stage slopes for `P0`, `P1` and `P2` do not differ, so there is no influence on initial rate of loss of coliforms due to pre-treatment (or between pre-treatments)
+- the early stage slopes for `P3` and `P4` do differ from `P1` and `P2`, in that they are more negative. We can tentatively draw the conclusion that post-treatment increases the initial rate of loss of coliforms
+
+Similarly:
+
+- the credibility intervals for the late stage slope estimates all overlap, indicating that we cannot distinguish between any of the treatments. We can tentatively draw the conclusion that the treatments do not differ in their effect after seven days
+- the slopes for all treatments overlap zero, or are only slightly negative. We can tentatively draw the conclusion that, after seven days, the bacterial population sizes are essentially static.
+- the intercepts for the late stage fits suggest that the `P3` and `P4` reduce coliforms to a lower level than the other treatments
+
+We plot the fitted values for the `10L` and `P3` treatments on the original data, below:
+
+```{r}
+p = ggplot(coliform_data, aes(x=day, y=logvalue, colour=treatment))
+p = p + geom_point()
+p = p + geom_abline(intercept=c1_coliform6_10L, slope=m1_coliform6_10L, colour="red", linetype="longdash") + 
+        geom_abline(intercept=c2_coliform6_10L, slope=m2_coliform6_10L, colour="red", linetype="longdash")
+p = p + geom_abline(intercept=c1_coliform6_P3, slope=m1_coliform6_P3, colour="blue", linetype="longdash") + 
+        geom_abline(intercept=c2_coliform6_P3, slope=m2_coliform6_P3, colour="blue", linetype="longdash")
+p
+```
+
+It should be possible to follow the same analysis procedure for the *E. coli* and Enterococci datasets with similar results.
+
+Also, it is certainly possible to tweak the model, so that we account for batch effects, or (partially) pooled parameters.

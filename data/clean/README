@@ -1,0 +1,38 @@
+for all sheets:
+use Ctrl + Shift + 6 to remove any rounding from the numbers
+
+For VS_clean,
+- delete merged (r1, FS, etc) column
+- combine all into one sheet for vs, with additional columns for measurment (VS), and day(0-28)
+- copy all and pase values only, no formlas
+- replaced headers spaces with underscores, removed CAPs etc
+For COD standards
+-ignore, trust the process
+
+for clean_COD
+- copied over all values after removing rounding formating
+- added headers
+- added coluns for day and measurement
+
+for clean_NH3
+- copied over all values including ph
+- added headers
+- added coluns for day and measurement
+-spli the pH into own sheet
+- change P1 to P0, etc in day0
+
+for clean_pH
+- removed excess spaces after replication stopped
+- added headers
+- added coluns for day and measurement
+
+for clean_CH4
+- copied to clean tab
+- note day 6/7 values when copying over normalizing standards
+- cleaned up headers
+
+The, made a dir for todays date, and exported all the clean sheets as CSVs 
+
+
+# CFUs
+I deleted all the zero readings for a greater dilution that I had a value for; see aggregate data for further details

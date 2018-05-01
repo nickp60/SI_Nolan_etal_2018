@@ -1,0 +1,488 @@
+---
+title: "Data Aggregation and Sanity Checking"
+subtitle: "Part of Nolan, et al 2018"
+author: "Nick Waters"
+date: "30/01/2018"
+output: 
+  html_document:
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(reshape2)
+knitr::opts_chunk$set(echo = TRUE)
+```
+# Data Fix Checklist
+Through this sanity checking, we discovered some minor errors in calculations that need to be corrected in the Plots, Discussion, etc:
+
+## Methane
+- Combined methane percent (fix wrong values being averaged)
+- Decide whether to average at the partial level or at the techrep level
+
+## CFUs
+- fix rounding errors when averaging and converting to/from log scale
+- fix E coli averaging errors at day 0
+
+## COD
+- find where the $*4000$ term comes from in the calculations
+
+
+# clean data
+Here are the paths to the cleaned data:
+```{r datapaths}
+outpath = file.path("..", "data","processed", "aggregated_clean_summarized.csv") 
+clean_dir <- file.path("..", "data", "clean")
+ch4_path <- file.path(clean_dir, "2018-03-03", "CH4.csv")
+nh3_path <- file.path(clean_dir, "2018-03-02", "NH3.csv")
+vs_path <- file.path(clean_dir, "2018-03-02", "VS.csv")
+cod_path <- file.path(clean_dir, "2018-03-03", "COD.csv")
+pH_path <- file.path(clean_dir, "2018-03-02", "pH.csv")
+cfu_data_path <- file.path(clean_dir, "2018-03-09", "CFUs.csv")
+
+ch4_data <- read.csv(ch4_path)
+nh3_data <- read.csv(nh3_path)
+vs_data  <- read.csv(vs_path)
+cod_data <- read.csv(cod_path)
+pH_data  <- read.csv(pH_path)
+cfu_data <- read.csv(cfu_data_path)
+```
+
+
+For details of the data cleaning, see the `README` file in `data/clean/`
+
+# Methane
+Lets start with the methane data.  At this point, the data has been cleaned and put in machine-readable format (see columns "clean_*" in `data/raw/UCD Spike 1 Frontiers Final 2018-03-02.xlsx/`)
+
+```{r}
+ch4_data$id <-ifelse(ch4_data$id == "", NA, as.character(ch4_data$id))
+
+ch4_data <- ch4_data %>%
+  fill(id, biogas_volumn_ml, stp_at_37_normalizing_factor)  # these are just reported once, but for later calculations we need them for each row
+
+# p
+ch4_data$biorep <- as.factor(ifelse(grepl("^R[1|2|3].*$", ch4_data$id),
+                          (gsub("^R(.).*$", "\\1", ch4_data$id)), # biorectors
+                          (gsub("^P[0|1|2|3|4|5]R(.).*$", "\\1", ch4_data$id))))  # batch
+ch4_data$treatment <- as.factor(ifelse(grepl("^R[1|2|3].*$", ch4_data$id),
+                          "10L", # biorectors
+                          (gsub("^(P[0|1|2|3|4|5])R(.).*$", "\\1", ch4_data$id))))  # batch
+# handle the partial readings that need to be summed; if only a single reading, we still need to group by it so we add a dummy "A"
+ch4_data$partial <- ifelse(grepl("^(.*)[A|B|C]$", ch4_data$id),
+                           gsub("^(.*)([A|B|C])$", "\\2", ch4_data$id),
+                           "A")
+ch4_data <- ch4_data %>%
+  group_by(day, treatment, biorep, partial) %>%
+  mutate(techrep = row_number())
+```
+
+ here we combine the data from the partial readings (when gas bags were filled multiple times due to  high output of biogas)
+```{r}
+ch4_data <- ch4_data %>% 
+  group_by(day, treatment, biorep, partial) %>%
+  mutate(
+    partial_ch4_percent= GC_value / ch4_standard_1_percent,
+    partial_volume_pure_ch4=(partial_ch4_percent/100) * biogas_volumn_ml * stp_at_37_normalizing_factor)
+```
+Now, we account for the partial bags/syringes by summing at the technical replicate level
+```{r}
+ch4_data <- ch4_data %>% 
+  group_by(day, treatment, biorep, techrep) %>%
+  mutate(total_biorep_volume_pure_ch4 = sum(partial_volume_pure_ch4),
+         weighted_ch4_percent = weighted.mean(partial_ch4_percent, partial_volume_pure_ch4))
+```  
+Looking at the data, our values look similar to those previously calculated, but we have retained the technical level values for replication. Lets get rid of the data we no longer need.
+
+
+```{r}
+summarize_process_data <- function(df, value_col, measure, sanity_col, sanity_threshold){
+  # takes a dataframe and selects the columns of interest, deleting the rest
+  # if given a sanity column, that will be checked to see if the values are the same within some threshold empirically set
+  sdf <- df %>%
+    select_("day", "treatment", "biorep", "techrep", value_col, sanity_col) %>%
+    as.data.frame()
+  sdf <- sdf %>%
+    fill(sanity_col)# often these need to be filled down, as only one value is present 
+  # drop any NA's life is short, and this will be apparent later in the analysis
+  sdf <- sdf[rowSums(is.na(sdf)) == 0,]  
+
+  sdf$diff <- abs(sdf[, value_col] - sdf[, sanity_col])
+  sdf$thresh <- sanity_threshold
+  if (any(sdf$diff > sdf$thresh)){
+    warning("Some values appear pretty different between the precalcualted and current values!  Please check manually before proceeding" )
+    weirdos  <- sdf[sdf$diff > sdf$thresh,]
+  } else {
+    weirdos <- data.frame()
+  }
+  sdf$diff <- NULL # do this before removing duplicates
+  sdf$thresh <- NULL
+  sdf[, sanity_col] <- NULL # do this before removing duplicates
+  sdf <- sdf[!duplicated(sdf),]
+  sdf$measure <- measure
+  sdf$value <- sdf[, value_col]
+  sdf[, value_col] <- NULL
+  return(list(summary=sdf, wierdos=weirdos))
+}
+
+
+ch4_summary <- summarize_process_data(
+  df =ch4_data,
+  value_col = "weighted_ch4_percent",  
+  measure="CH4",
+  sanity_col="combined_methane_percent", sanity_threshold=1.5 )
+print(ch4_summary$wierdos)
+```
+We have a calculated things slightly differently than previously.  The old method was to average the technical replicates per partial reading per biological replicate, calculate the volume/percent/ etc for the partial readings , average across biological replicates.  Here, we calculate the percentage/volume for each technical replicate (ie techrep 1 for partialA, partialB,partialC), and generate a technical replicate  weighted.  I think this is more accurate as it both combines the partial readings at a stage where we do not lose the technical replication.
+
+
+And here's a rough plot for sanity checking.   Does this seem to agree with previous plots?
+(Note here we are averaging the tech reps)
+```{r}
+ggplot(ch4_summary$summary %>% group_by(day, treatment, biorep) %>%
+         mutate(biorep_mean_agg_ch4=mean(value)), 
+       aes(x=day, y=biorep_mean_agg_ch4, 
+           group=interaction(treatment, day), 
+           fill=treatment)) +
+  scale_x_continuous(breaks=unique(ch4_summary$summary$day) ) +
+  geom_boxplot() + 
+  geom_jitter(width=.01, height=.01, aes(color=treatment), alpha=.3) + 
+  scale_color_discrete(guide=FALSE)+
+  labs(
+    title="Methane production over time", 
+    subtitle="Data are the mean of 3 technical replicates; n=3",
+    x="Day", 
+    y="Methane Percent", 
+    fill="Treatment"
+  )
+```
+
+# Ammonia
+```{r}
+
+nh3_data$biorep <- as.factor(ifelse(grepl("^R[1|2|3].*$", nh3_data$id),
+                          (gsub("^R(.).*$", "\\1", nh3_data$id)), # biorectors
+                          (gsub("^P[0|1|2|3|4|5]R(.).*$", "\\1", nh3_data$id))))  # batch
+nh3_data$treatment <- as.factor(ifelse(grepl("^R[1|2|3].*$", nh3_data$id),
+                          "10L", # biorectors
+                          (gsub("^(P[0|1|2|3|4|5])R(.).*$", "\\1", nh3_data$id))))  # batch
+nh3_data <- nh3_data %>%
+  group_by(day, treatment, biorep) %>%
+  mutate(techrep = row_number(),
+         mg_NH3_per_L_confirm = 50 * dilue_value_1_in_50,
+         tech_mean_nh3 = mean(mg_NH3_per_L_confirm))
+
+# sanity check that the values calcualted here roughly match existing values
+nh3_data <- nh3_data %>%
+  group_by(day, treatment) %>%
+  mutate(mean_nh3 = mean(tech_mean_nh3 ))
+# subset out relevent data
+nh3_summary <- summarize_process_data(
+  df = nh3_data,
+  value_col = "tech_mean_nh3",  
+  measure="NH3",
+  sanity_col="average_mg_nh3_per_L", sanity_threshold=100 )
+nh3_summary$wierdos
+```
+I get a few warnings, but due to the lack of technical replication, this isn't surprising.  manual inspection shows things to look OK. 
+
+
+And lets take a quick look
+```{r}
+ggplot(nh3_summary$summary %>% group_by(day, treatment, biorep) %>%
+         mutate(mean_val=mean(value)), 
+       aes(x=day, y=mean_val, 
+           group=interaction(treatment, day), 
+           fill=treatment)) +
+  scale_x_continuous(breaks=unique(nh3_summary$summary$day) ) +
+  geom_boxplot() + 
+  geom_jitter(width=.01, height=.01, aes(color=treatment), alpha=.3) + 
+  scale_color_discrete(guide=FALSE)+
+  labs(
+    title="Ammonia production over time", 
+    subtitle="Data are the mean of 1 or 2 technical replicates; n=3",
+    x="Day", 
+    y="Ammonia (mg/L)", 
+    fill="Treatment"
+  )
+```
+
+
+# Volitile Solids
+It is important to note that the Feed-stock is treated as a single unit, and all the replicates are technical.  These values do not get used much, but serve as a reference.  Overall, The interesting comparison in these reactors is how the digestate (reactor contents at the end of 28 days) compares to the feedstock in terms of pathogen dieoff, COD removal, etc.
+```{r}
+# handle the Feed Stock column : we make it look like a reactor.
+
+#This gets it treated as technical replication.
+vs_data$id <- gsub("FS(\\d)", "F1", vs_data$id)
+
+#This gets it treated as biological replication.
+# vs_data$id <- gsub("FS(\\d)", "F\\1A", vs_data$id)
+
+vs_data$biorep <- as.factor(ifelse(grepl("^[R|F]\\d.*$", vs_data$id),
+                          (gsub("^[R|F](.).*$", "\\1", vs_data$id)), # biorectors
+                          (gsub("^P[0|1|2|3|4|5]R(.).*$", "\\1", vs_data$id))))  # batch
+# as technical
+vs_data$treatment <- as.factor(ifelse(grepl("^R[1|2|3].*$", vs_data$id),
+                          "10L", # biorectors
+                          (gsub("^(P[0|1|2|3|4|5])R(.).*$", "\\1", vs_data$id))))  # batch
+# as biological
+# vs_data$treatment <- as.factor(ifelse(grepl("^[R|F].*\\d.*$", vs_data$id),
+#                           ifelse(grepl("^R[1|2|3].*$", vs_data$id), "10L", "FS"), # biorectors
+#                           (gsub("^(P[0|1|2|3|4|5])R(.).*$", "\\1", vs_data$id))))  # batch
+
+vs_data <- vs_data %>%
+  group_by(day, treatment, biorep) %>%
+  mutate(techrep = row_number(),
+         vs_percent_2 = (dry_weights -ash_weight) / (wet_combined_weight - glass_weight) * 100,
+         tech_mean_vs = mean(vs_percent_2))
+
+vs_summary <- summarize_process_data(
+  df = vs_data,
+  value_col = "vs_percent_2",  
+  measure="VS",
+  sanity_col="vs_percent", sanity_threshold=.1 )
+```
+And lets take a quick look
+```{r}
+ggplot(vs_summary$summary %>% group_by(day, treatment, biorep) %>%
+         mutate(mean_val=mean(value)), 
+       aes(x=day, y=mean_val, 
+           group=interaction(treatment, day), 
+           fill=treatment)) +
+  scale_x_continuous(breaks=unique(vs_summary$summary$day) ) +
+  geom_boxplot() + 
+  geom_jitter(width=.01, height=.01, aes(color=treatment), alpha=.3) + 
+  scale_color_discrete(guide=FALSE)+
+  labs(
+    title="Volitile Solids  over time", 
+    subtitle="Data are the mean of 2-4 technical replicates; n=3, except for feedstock (n=1)",
+    x="Day", 
+    y="VS (percent)", 
+    fill="Treatment"
+  )
+```
+
+
+# Chemical Oxygen Demand
+
+Here's a question:  It looks like COD is calculated by 
+$$(blankmean - GCreading) * molarityOfStandard * 4000$$
+>Where does the 4000 come from?
+
+
+```{r}
+
+#This gets it treated as technical replication.
+cod_data$id <- gsub("FS(\\d)", "F1", cod_data$id)
+
+#This gets it treated as biological replication.
+# cod_data$id <- gsub("FS(\\d)", "F\\1A", cod_data$id)
+
+cod_data$biorep <- as.factor(ifelse(grepl("^[R|F]\\d.*$", cod_data$id),
+                          (gsub("^[R|F](.).*$", "\\1", cod_data$id)), # biorectors
+                          (gsub("^P[0|1|2|3|4|5]R(.).*$", "\\1", cod_data$id))))  # batch
+# as technical
+cod_data$treatment <- as.factor(ifelse(grepl("^R[1|2|3].*$", cod_data$id),
+                          "10L", # biorectors
+                          (gsub("^(P[0|1|2|3|4|5])R(.).*$", "\\1", cod_data$id))))  # batch
+# as biological
+# cod_data$treatment <- as.factor(ifelse(grepl("^[R|F].*\\d.*$", cod_data$id),
+#                           ifelse(grepl("^R[1|2|3].*$", cod_data$id), "10L", "FS"), # biorectors
+#                           (gsub("^(P[0|1|2|3|4|5])R(.).*$", "\\1", cod_data$id))))  # batch
+
+
+cod_data <- cod_data %>%
+  group_by(day, measure, treatment, biorep) %>% # we make sure we group by  measurement as well!
+  mutate(techrep = row_number())
+
+cod_data$COD <-  (cod_data$standard_value - cod_data$GC_val) * cod_data$standard_molarity * 4000 * cod_data$dilution
+
+sCOD_summary <- summarize_process_data(
+  df = cod_data[cod_data$measure == "sCOD", ],
+  value_col = "COD",  
+  measure="sCOD",
+  sanity_col="COD_mg_per_l", sanity_threshold=.01 )
+tCOD_summary <- summarize_process_data(
+  df = cod_data[cod_data$measure == "tCOD", ],
+  value_col = "COD",  
+  measure="tCOD",
+  sanity_col="COD_mg_per_l", sanity_threshold=.01 )
+
+
+cod_summary <- rbind(sCOD_summary$summary, tCOD_summary$summary)
+```
+And lets take a quick look
+```{r}
+ggplot(cod_summary %>% group_by(day, measure, treatment, biorep) %>%
+         mutate(mean_val=mean(value)), 
+       aes(x=day, y=mean_val, 
+           group=interaction(treatment, day), 
+           fill=treatment)) +
+  scale_x_continuous(breaks=unique(cod_summary$day) ) +
+  facet_wrap(~measure, nrow=1, scale="free") +
+  geom_boxplot() + 
+  geom_jitter(width=.01, height=.01, aes(color=treatment), alpha=.3) + 
+  scale_color_discrete(guide=FALSE)+
+  labs(
+    title="COD over time", 
+    subtitle="Data are the mean of 2-3 technical replicates; n=3 (except for feedstock: tech_n=8, n=1)",
+    x="Day", 
+    y="mg/L", 
+    fill="Treatment"
+  )
+
+```
+
+
+
+
+# pH
+```{r}
+
+pH_data$id <- gsub("FS(\\d)", "F1", pH_data$id)
+
+pH_data$biorep <- as.factor(ifelse(grepl("^[R|F]\\d.*$", pH_data$id),
+                          (gsub("^[R|F](.).*$", "\\1", pH_data$id)), # biorectors
+                          (gsub("^P[0|1|2|3|4|5]R(.).*$", "\\1", pH_data$id))))  # batch
+pH_data$treatment <- as.factor(ifelse(grepl("^R\\d.*$", pH_data$id),
+                          "10L", # biorectors
+                          (gsub("^(P\\d)R(.).*$", "\\1", pH_data$id))))  # batch
+pH_data <- pH_data %>%
+  group_by(day, treatment, biorep) %>%
+  mutate(techrep = row_number(), pH2 = pH+0)
+
+pH_summary <- summarize_process_data(
+  df = pH_data,
+  value_col = "pH",  
+  measure="pH",
+  sanity_col="pH2", sanity_threshold=.0 )
+```
+We have no sanity checking here for the calculations, because there are no calculations!
+
+
+And lets take a quick look
+```{r}
+ggplot(pH_summary$summary %>% group_by(day, treatment, biorep) %>%
+         mutate(mean_val=mean(value)), 
+       aes(x=day, y=mean_val, 
+           group=interaction(treatment, day), 
+           fill=treatment)) +
+  scale_x_continuous(breaks=unique(pH_summary$summary$day) ) +
+  geom_boxplot() + 
+  geom_jitter(width=.01, height=.01, aes(color=treatment), alpha=.3) + 
+  scale_fill_brewer(palette = "Set1")
+
+  labs(
+    title="pH  over time", 
+    subtitle="Data are the mean of 1-2 technical replicates; n=3 (feedstock n=1)",
+    x="Day", 
+    y="pH", 
+    fill="Treatment"
+  )
+```
+
+# CFUs
+The CFU data is the strangest of the measurements.  Quantification was performed with the Colisure kits, which gives a values for Colony Forming Units for a given dilution.   
+
+```{r}
+cfu_data$id <- gsub("FS(\\d)", "F1", cfu_data$id)
+cfu_data$id[cfu_data$id == ""] <- NA
+cfu_data$bug[cfu_data$bug == ""] <- NA
+cfu_data <- cfu_data %>%
+  fill(bug, id)  # these are just reported once, but for later calculations we need them for each row
+
+cfu_data$biorep <- as.factor(ifelse(grepl("^[R|F]\\d.*$", cfu_data$id),
+                          (gsub("^[R|F](.).*$", "\\1", cfu_data$id)), # biorectors
+                          (gsub("^P[0|1|2|3|4|5]R(.).*$", "\\1", cfu_data$id))))  # batch
+cfu_data$treatment <- as.factor(ifelse(grepl("^[R|F].*\\d.*$", cfu_data$id),
+                          "10L", # biorectors
+                          (gsub("^(P[0|1|2|3|4|5])R(.).*$", "\\1", cfu_data$id))))  # batch
+
+cfu_data <- melt(
+  cfu_data, 
+  id.vars = c("bug", "id", "day", "biorep", "Average", "treatment"),
+  measure.vars = colnames(cfu_data)[grepl("x\\d*",colnames(cfu_data ))],
+  variable.name = "multiplier")
+
+
+cfu_data$multiplier <- as.numeric(gsub("x", "", cfu_data$multiplier))
+cfu_data$day <- as.numeric(gsub("Day", "", cfu_data$day))
+
+# watch the tech rep calculation; we have lots of NAs, so we only count those with readings
+cfu_data <- cfu_data %>%
+  group_by(bug, day, treatment, biorep) %>%
+  filter(!is.na(value)) %>%
+  mutate(techrep=row_number(), scaled_value = value * multiplier) %>%
+  mutate(biomean = mean(scaled_value, na.rm=T))
+
+cfu_summary <- summarize_process_data(
+  df = cfu_data,
+  value_col = "biomean",  
+  measure="CFUs",
+  sanity_col="Average", sanity_threshold=10 )
+print(cfu_summary$wierdos)
+```
+We get the warning about manually checking values;  Looking at the original data, it looks like the averages were calculated after rounding.  So i think I'll stick with these numbers.
+
+We also need to fix some of the day 0 calculations for E. coli
+
+
+We have three bug's measurements in here, so we need to say that rather than "CFUs", and get rid of the extra column:
+
+
+```{r rename_cfus}
+
+cfu_summary$summary$measure <- cfu_summary$summary$bug
+cfu_summary$summary$bug <- NULL
+```
+
+
+```{r plot_cfs}
+
+ggplot(cfu_summary$summary %>% group_by(day, treatment, biorep, measure) %>%
+         mutate(mean_val=mean(value)), 
+       aes(x=day, y=mean_val, 
+           group=interaction(treatment, day), 
+           fill=treatment)) +
+  scale_x_continuous(breaks=unique(cfu_summary$summary$day) ) +
+  facet_grid(~measure) +
+  geom_boxplot() + 
+  scale_y_log10(breaks=c(1,10, 100, 1000, 10000, 100000, 1000000), 
+                labels=c("0", "1", "2", "3", "4", "5", "6")) +
+  geom_jitter(width=.01, height=.01, aes(color=treatment), alpha=.3) + 
+  scale_color_discrete(guide=FALSE)+
+  labs(
+    title="Pathogens over time", 
+    subtitle="n=3",
+    x="Day", 
+    y=expression(paste(Log[10], " CFUs/g")), 
+    fill="Treatment"
+  )
+
+```
+
+
+# writing out checked data
+Now we have all the important values summarized at the technical replicate level.  Lets combined this and write out to a single file.  To track when the data was generated without keeping around old aggregated data, we add a comment line before the header to give the date the file was generated.
+
+```{r}
+all_summary <- rbind(ch4_summary$summary, nh3_summary$summary, vs_summary$summary, sCOD_summary$summary, tCOD_summary$summary, pH_summary$summary, cfu_summary$summary)
+
+
+outpath = file.path("..", "data","processed", "aggregated_clean_summarized.csv") 
+con <- file(outpath, open="wt")
+writeLines(paste("# this data was aggregated by Nolan_et_al_2018/scripts/aggregate_data.Rmd on", Sys.Date()), con)
+write.table(all_summary, 
+            file = con,
+            sep = ",")
+close(con) 
+
+```
+
+
+
+
+

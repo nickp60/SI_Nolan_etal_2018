@@ -1,0 +1,372 @@
+---
+title: "Piecewise Linear Fit of FIO Data"
+author: "Leighton Pritchard"
+date: "30/04/2018"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Packages are required for pretty plotting, and statistical analysis
+library(dplyr)
+library(ggplot2)
+library(rstan)
+library(stringr)
+library(tidyr)
+```
+
+## Introduction
+
+To analyse the FIO levels under the effect of various treatments (10L/50mL vessels; pasteurised/unpasteurised; pre-pasteurisation; post-pasteurisation) we use piecewise linear regression to estimate the rate of FIO loss at two stages of fermentation: "early" and "late".
+
+### Piecewise linear regression
+
+It would be natural to assume a smooth (rather than piecewise) exponential decay rate for FIO as fermentation progresses. Arguably, the choice of piecewise linear regression is mechanistically inappropriate, as it is unlikely that population change occurs in two distinct, linear phases. However, several features of the data lead us to use piecewise linear regression as a reasonable approximation to the measured change in population size for the purpose of identifying treatment effects in this study, despite it being an unlikely representation of the true biological mechanism.
+
+- There are a small number of widely-spaced measured timepoints. These do not describe the early stage reduction of bacteria in sufficient resolution to fit a single detailed mechanism of bacterial population change. This is particularly so in the early stages of population reduction.
+- The timepoints from 7d onwards describe a regime with little overall change in bacterial population. Datapoints from 7d onwards are the bulk of the dataset. A linear fit to this regime permits estimates of:
+  - slope: which we might expect to be zero if the bacterial population is at equilibrium, and non-zero if there continues to be growth or loss
+  - intercept: which we may interpret as a proxy for the equilibrium population level, if the credibility interval for the slope contains zero
+- The timepoints up to 7d cover the majority of bacterial population reduction, but not at a detailed resolution capable of discriminating between alternative models of population reduction. In several cases we have only data at 0d and 7d. Here, a linear fit to this regime provides estimates of:
+  - slope: which we may interpret as a proxy for average rate of reduction over seven days, regardless of the total or initial rate of loss for that treatment
+  - intercept: which we may interpret as the initial bacterial load
+
+By using piecewise linear regression with two regimes we approximate an early 'loss' regime, and late 'equilibrium' regime for the FIO population. While mechanistically far from ideal, we remain able to assess differences between: rate of FIO reduction (taking into account initial bacterial load); final bacterial load; and to what extent the bacterial population is at an equilibrium, for each treatment.
+
+### Location of transition point
+
+It would be possible to assume that the transition point between 'early' (loss) and 'late' (equilibrium) could occur at any timepoint. However, we assert a transition point at seven days, for the following reasons:
+
+- For all treatments, there appears to be no effective change in FIO load after the 7d timepoint. The transition between 'early' and 'late' stages is therefore between 0d and 7d.
+- For some treatments, we do not have timepoints between 0d and 7d. In order to estimate a rate of FIO loss, we require a minimum of two timepoints, and would be unable to infer 'early' stage FIO loss if we took the transition to be any earlier than 7d. For these treatments, we must therefore take 0d and 7d to be the start and end of the 'early' period.
+
+### The model
+
+We fit the following piecewise linear model to the cleaned dataset for each bacterial group:
+
+$$\hat{y} = \bigg \{ \begin{array}{cccl} m1_i x & + & c1_i & , \textrm{if } x <= 7 \\ m2_i x & + & c2_i & , \textrm{if } x > 7\end{array} \bigg \} + \epsilon $$
+
+where:
+
+- $\hat{y}$ is the FIO population level
+- $x$ is the measurement timepoint
+- $i$ is an index representing the treatment
+  - $i = 1$: 10L vessel, no pasteurisation
+  - $i = 2$: 50mL vessel, no pasteurisation (P0)
+  - $i = 3$: 50mL vessel, pre-pasteurisation (P1)
+  - $i = 4$: 50mL vessel, pre-pasteurisation (P2)
+  - $i = 5$: 50mL vessel, post-pasteurisation (P3)
+  - $i = 6$: 50mL vessel, post-pasteurisation (P4)
+- $m1$ is the early stage slope
+- $c1$ is the early stage intercept
+- $m2$ is the late stage slope
+- $c2$ is the late stage intercept
+- $\epsilon$ is irreducible (measurement) error
+
+## Data Processing
+
+We use the cleaned dataset in `aggregated_clean_summarized.csv`, as described elsewhere in the Supplementary Information and manuscript, and make it suitable for analysis.
+
+- First the data is loaded, and columns converted to the appropriate datatype.
+
+```{r}
+# Load the experimental data
+datafile="../processeddata/2018-03-09/aggregated_clean_summarized.csv"
+data = read.table(datafile, header=TRUE, sep=",")
+
+# Replicate labels should be factors, not integers
+data$biorep = as.factor(data$biorep)
+data$techrep = as.factor(data$techrep)
+```
+
+- The feedstock (`FS`) data are removed:
+
+```{r}
+# Remove the feedstock data
+data = data %>% filter(treatment != "FS")
+```
+
+- Columns are renamed for ease of interpretation:
+  - `day`: measurement timepoint
+  - `treatment`: string describing the treatment
+  - `replicate`: the replicate identifier for the measurement at that timepoint for that treatment
+  - `measurement`: identifier for the measurement (meaning is dependent on the vessel being measured - see manuscript for details)
+  - `measure`: string describing what was measured
+  - `value`: the measured value
+
+```{r}
+# Rename techrep column
+names(data) = c("day", "treatment", "replicate", "measurement", "measure", "value")
+```
+
+- Create a new column:
+  - `vessel`: a unique combination of timepoint, replicate and treatment to clarify the distinction between repeated measures and destructive sampling; this contains a unique value for each physically-measured vessel
+
+```{r}
+# Map the biorep column to a new column called vessel, where each vessel is a
+# unique combination of timepoint, biorep, and treatment.  This helps reflects which values are repeated measures over time, and which are the result of destructive sampling. 
+data = data %>%
+  mutate(vessel = paste(treatment, replicate, day, sep="_"))
+  
+# Set the chamber for the 10L treatments to be the biorep value
+data[data$treatment == "10L",] = data %>%
+  filter(treatment == "10L") %>%
+  mutate(vessel=replicate)
+
+# Make the chamber column a factor
+data$vessel = as.factor(data$vessel)
+```
+
+- Add columns containing indices for each treatment. These are useful as indices for tracking treatments, and calculating contrasts.
+
+```{r}
+# Add P0 index (small vessel, applies to all P0-P4 treatments, not 10L)
+# I'm going to rename this "small", just to avoid the confusion I experienced at first
+data$small = !data$treatment %in% c("10L")
+
+# Add index for each pasteurisation treatment
+data$P1 = data$treatment == "P1"
+data$P2 = data$treatment == "P2"
+data$P3 = data$treatment == "P3"
+data$P4 = data$treatment == "P4"
+```
+
+- Change FIO names, for easier manipulation in `R`.
+
+```{r}
+# Replace bacterial measurement names
+data$measure = data$measure %>%
+  str_replace("E. coli", "ecoli") %>%
+  str_replace("Enterococci", "enterococci") %>%
+  str_replace("Coliforms", "coliforms")
+```
+
+- Create a new column (`logvalue`) with log-transformed bacterial count data. We expect the limit of detection to be approximately a count of 100, so we take any "undetected" value and raise it to half of the expected detection limit, before taking the log.
+
+```{r}
+# Convert bacterial counts to logs, and set zeroes to counts of '50' (below detection limit)
+data$logvalue = log10(pmax(data$value, 50))
+```
+
+A summary of the dataset is included below:
+
+```{r}
+# Columnwise summary of data
+summary(data)
+```
+
+### FIO datasets
+
+We generate three subsets of the main dataset: one for each of the FIO groups:
+
+```{r}
+coliform_data = data %>% filter(measure == "coliforms")
+enterococci_data = data %>% filter(measure == "enterococci")
+ecoli_data = data %>% filter(measure == "ecoli")
+```
+
+## Fitting bacterial datasets
+
+We fit each dataset to the model described above using `STAN`. We define a single model in `STAN` code that will be used for each dataset. This describes the following data to be input for each fit:
+
+- `N`: the total number of datapoints (bacterial counts)
+- `Ntrt`: the total number of treatments we are considering
+- `y`: a list of the bacterial counts at each timepoint
+- `t`: the corresponding timepoints for each measurement `y`
+- `trt`: the corresponding treatments for each measurement `y`
+
+and describes the model stated above in `STAN` code.
+
+```{r}
+stan_code = "
+data {
+  int<lower=0> N;           // total number of datapoints
+  int<lower=0> Ntrt;        // total number of treatments
+  vector[N] y;              // bacterial counts
+  vector[N] t;              // timepoints
+  int<lower=1, upper=Ntrt> trt[N];            // treatments
+}
+parameters {
+  vector[Ntrt] m1;                  // slope - early stage
+  vector[Ntrt] c1;                  // intercept - early stage
+  vector[Ntrt] m2;                  // slope - late stage
+  vector[Ntrt] c2;                  // intercept - late stage
+  real<lower=0> sigma;      // measurement error
+}
+transformed parameters {
+  vector[N] y_hat;         // the *real* measured value, without measurement error
+
+  for (i in 1:N) {
+    if (t[i] <= 7) {                      // hardcode transition timepoint
+      y_hat[i] = m1[trt[i]] * t[i]+ c1[trt[i]];           // simple linear fit, early stage
+    } else {
+      y_hat[i] = m2[trt[i]] * t[i] +c2[trt[i]];           // simple linear fit, late stage
+    }
+  }
+}
+model {
+  y ~ normal(y_hat, sigma);               // fit with error
+}
+"
+```
+
+### Coliform fit
+
+We first convert the coliform data into the appropriate format for the `STAN` model as `coliform_trt_stan_data`:
+
+```{r}
+coliform_data$treatment = droplevels(coliform_data$treatment, "FS")
+coliform_trt_stan_data = list(N = nrow(coliform_data),
+                              y = coliform_data$logvalue,
+                              t = coliform_data$day,
+                              trt = as.integer(coliform_data$treatment),
+                              Ntrt = nlevels(coliform_data$treatment))
+```
+
+Then call `STAN` to fit the model, producing output in `coliform_fit`:
+
+```{r, results='hide'}
+coliform_fit = stan(model_code = stan_code,
+                    data = coliform_trt_stan_data,
+                    iter = 4000,
+                    chains = 4)
+```
+
+Once the model has been fit, we can inspect the fitted values:
+
+```{r}
+summary_coliform = summary(coliform_fit, pars=c("m1", "c1", "m2", "c2"), probs = c(0.25, 0.75))
+summary_coliform$summary
+```
+
+#### Interpretation
+
+This can be visualised graphically, showing 80% (red, filled area) and 95% (distribution ends) CIs:
+
+```{r}
+# Plot the early stage slopes
+plot(coliform_fit, pars=c("m1"), show_density=TRUE)
+```
+
+```{r}
+# Plot the early stage intercepts
+plot(coliform_fit, pars=c("c1"), show_density=TRUE)
+```
+
+```{r}
+# Plot the late stage slopes
+plot(coliform_fit, pars=c("m2"), show_density=TRUE)
+```
+
+```{r}
+# Plot the late stage intercepts
+plot(coliform_fit, pars=c("c2"), show_density=TRUE)
+```
+
+### *E. coli* fit
+
+We first convert the *E. coli* data into the appropriate format for the `STAN` model as `ecoli_trt_stan_data`:
+
+```{r}
+ecoli_data$treatment = droplevels(ecoli_data$treatment, "FS")
+ecoli_trt_stan_data = list(N = nrow(ecoli_data),
+                           y = ecoli_data$logvalue,
+                           t = ecoli_data$day,
+                           trt = as.integer(ecoli_data$treatment),
+                           Ntrt = nlevels(ecoli_data$treatment))
+```
+
+We call STAN to fit the model, storing the result in ecoli_fit:
+
+```{r, results='hide'}
+ecoli_fit = stan(model_code = stan_code,
+                 data = ecoli_trt_stan_data,
+                 iter = 4000,
+                 chains = 4)
+```
+
+We again inspect the fitted values:
+
+```{r}
+summary_ecoli = summary(ecoli_fit, pars=c("m1", "c1", "m2", "c2"), probs = c(0.25, 0.75))
+summary_ecoli$summary
+```
+
+#### Interpretation
+
+```{r}
+# Plot the early stage slopes
+plot(ecoli_fit, pars=c("m1"), show_density=TRUE)
+```
+
+```{r}
+# Plot the early stage intercepts
+plot(ecoli_fit, pars=c("c1"), show_density=TRUE)
+```
+
+```{r}
+# Plot the late stage slopes
+plot(ecoli_fit, pars=c("m2"), show_density=TRUE)
+```
+
+```{r}
+# Plot the late stage intercepts
+plot(ecoli_fit, pars=c("c2"), show_density=TRUE)
+```
+
+### Enterococci fit
+
+We convert the Enterococci data for the `STAN` model as `enterococci_trt_stan_data`:
+
+```{r}
+enterococci_data$treatment = droplevels(enterococci_data$treatment, "FS")
+enterococci_trt_stan_data = list(N = nrow(enterococci_data),
+                                 y = enterococci_data$logvalue,
+                                 t = enterococci_data$day,
+                                 trt = as.integer(enterococci_data$treatment),
+                                 Ntrt = nlevels(enterococci_data$treatment))
+```
+
+We call STAN to fit the model, storing the result in ecoli_fit:
+
+```{r, results='hide'}
+enterococci_fit = stan(model_code = stan_code,
+                       data = enterococci_trt_stan_data,
+                       iter = 4000,
+                       chains = 4)
+```
+
+We again inspect the fitted values:
+
+```{r}
+summary_enterococci = summary(enterococci_fit, pars=c("m1", "c1", "m2", "c2"), probs = c(0.25, 0.75))
+summary_enterococci$summary
+```
+
+
+#### Interpretation
+
+```{r}
+# Plot the early stage slopes
+plot(enterococci_fit, pars=c("m1"), show_density=TRUE)
+```
+
+```{r}
+# Plot the early stage intercepts
+plot(enterococci_fit, pars=c("c1"), show_density=TRUE)
+```
+
+```{r}
+# Plot the late stage slopes
+plot(enterococci_fit, pars=c("m2"), show_density=TRUE)
+```
+
+```{r}
+# Plot the late stage intercepts
+plot(enterococci_fit, pars=c("c2"), show_density=TRUE)
+```
+

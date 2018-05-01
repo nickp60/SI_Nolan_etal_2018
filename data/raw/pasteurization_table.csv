@@ -1,0 +1,7 @@
+Stage,Code,Name,Description
+,10L,10L,Unpasteurized
+,P0,P0,Unpasteurized
+Pre-AD,P1,Pre1,60C for 96 hours
+Pre-AD,P2,Pre2,"70C for 1 hour, (EU Standard)"
+Post-AD,P3,Post1,60C for 96 hours
+Post-AD,P4,Post2,70C for 1 hour. (EU Standard)
