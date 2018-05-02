@@ -7,7 +7,7 @@ When running `.Rmd` scripts, use the `./analysis/` dir as your working directory
 
 For data preparation, see [aggregate_data.Rmd](./scripts/aggregate_data.html)
 
-For modelling analysis, see [BHM_all_results.Rmd](./scripts/BHM_all_results.html)
+For modelling analysis, see [pooled_indicator_modelling.Rmd](./analysis/pooled_indicator_modelling.html)
 
 Models can be found under the `models` dir.  
 

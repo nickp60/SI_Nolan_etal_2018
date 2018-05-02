@@ -67,7 +67,11 @@ basic_fit_plots <- function(fit, condition_names=c(), ignored_params = c("y_hat"
   # ignore y_hat, sigma and log posterior for now
   fit_df <- as.data.frame(summary(fit)$summary)
   fit_df$param <- row.names(fit_df)
-  fit_df <- fit_df[!grepl(ignored_params, fit_df$param), ]
+  ignored_cols <- rep(TRUE, length(fit_df$param))
+  for (param in ignored_params){
+    ignored_cols <- ifelse(grepl(param, fit_df$param), FALSE, ignored_cols)
+  }
+  fit_df <- fit_df[ignored_cols, ]
   
   global_pars = fit@model_pars[fit@model_pars %in% names(fit)]
   sample_pars = fit@model_pars[!fit@model_pars %in% names(fit)]
@@ -180,16 +184,17 @@ fit_model_to_df_pp <- function(df, condition_col, id_cols, model_path=NA, model_
   
 }
 plot_all_fits <- function(fits, param, condition_names){
+  
   plots <- list()
   for (f in 1:length(fits)){
+    plotcol = ifelse("m" %in% strsplit(param, split = "")[[1]] ,"#B2001D" , "#0083B2")
+    p <- plot(fits[[f]], show_density = TRUE, ci_level = 0.8, pars = c(param), fill_color=plotcol)
     if (f == 1){
-      p <- plot(fits[[f]], show_density = TRUE, ci_level = 0.8, pars = c(param)) +
-        labs(title=paste(names(fits)[f]), subtitle=paste("parameter:", param)) + 
+       p <- p + labs(title=paste(names(fits)[f]), subtitle=paste("parameter:", param)) + 
         scale_y_discrete(limits=sort(unique(as.character(condition_names)),decreasing = T)) + theme(panel.grid=element_line(color="gray10"))
         
     } else{
-      p <- plot(fits[[f]], show_density = TRUE, ci_level = 0.8, pars = c(param)) +
-        labs(title=paste(names(fits)[f]), subtitle=" ") + theme(axis.text.y = element_blank(), panel.grid=element_line(color="gray10"))
+      p <- p + labs(title=paste(names(fits)[f]), subtitle=" ") + theme(axis.text.y = element_blank(), panel.grid=element_line(color="gray10"))
     }
     plots <- c(plots, list(p))
   }
@@ -199,7 +204,4 @@ plot_all_fits <- function(fits, param, condition_names){
   #                       c(2,3)))
   
 }
-plot_all_fits(fits = c("E. coli" = ecoli_fit, 
-                       "Ents" = enterococci_fit, 
-                       "Coils" = coliform_fit), param="c2", condition_names = ecoli_data$treatment)
 
