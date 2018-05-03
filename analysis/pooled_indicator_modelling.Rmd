@@ -1,11 +1,14 @@
 ---
 title: "Piecewise Linear Fit of FIO Data - pooled parameters"
 author: "Leighton Pritchard and Nicholas Waters"
-date: "02/05/2018"
+date: '`r Sys.Date()`'
 output:
   html_document:
     toc: true
     toc_float: true
+    toc_depth: 4
+    theme: simplex
+    highlight: tango
 editor_options: 
   chunk_output_type: console
 ---
@@ -21,11 +24,13 @@ library(stringr)
 library(tidyr)
 source("../scripts/helperfunctions.R")
 pooled_lp <- "../models/pooled_indicator_LP.stan"
+datafile="../data/processed/aggregated_clean_summarized.csv"
+
 ```
 
 ## Introduction
 
-To analyse the FIO levels under the effect of various treatments (10L/50mL vessels; pasteurised/unpasteurised; pre-pasteurisation; post-pasteurisation) we use piecewise linear regression to estimate the rate of FIO loss at two stages of fermentation: "early" and "late". We pool the estimated parameters, assuming that each is drawn from a single distribution that applies to the bacterial family.
+To analyse the Faecal Indicator Organism (FIO) levels under the effect of various treatments (10L/50mL vessels; pasteurised/unpasteurised; pre-pasteurisation; post-pasteurisation) we use piecewise linear regression to estimate the rate of FIO loss at two stages of fermentation: "early" and "late". We pool the estimated parameters, assuming that each is drawn from a single distribution that applies to the bacterial family.
 
 ### Piecewise linear regression
 
@@ -80,13 +85,12 @@ and $m1_i$, $c1_i$, $m2_i$, and $c2_i$ are values drawn from the following distr
 
 ## Data Processing
 
-We use the cleaned dataset in `aggregated_clean_summarized.csv`, as described elsewhere in the Supplementary Information and manuscript, and make it suitable for analysis.
+We use the cleaned dataset in `r datafile`, as described elsewhere in the Supplementary Information and manuscript, and make it suitable for analysis.
 
 - First the data is loaded, and columns converted to the appropriate datatype.
 
 ```{r}
 # Load the experimental data
-datafile="../data/processed/aggregated_clean_summarized.csv"
 data = read.table(datafile, header=TRUE, sep=",")
 
 # Replicate labels should be factors, not integers
@@ -138,7 +142,7 @@ data$vessel = as.factor(data$vessel)
 - Add columns containing indices for each treatment. These are useful as indices for tracking treatments, and calculating contrasts.
 
 ```{r}
-# Add P0 index (small vessel, applies to all P0-P4 treatments, not 10L)
+# Add "small" index (50ml vessel, applies to all P0-P4 treatments, not 10L)
 # I'm going to rename this "small", just to avoid the confusion I experienced at first
 data$small = !data$treatment %in% c("10L")
 
@@ -365,8 +369,28 @@ plot(enterococci_fit, pars=c("c2"), show_density=TRUE)
 ```
 
 
-# Interpretation
-```{r}
+## Interpretation
+As a reminder, we have two main research questions: 
+1. Are die-off rates similar between the 10L and 50ml reactors?  
+2. Do any of the 4 pasteurization schemes have an effect on die-off?
+### Days 0 -- 7 
+Lets start by looking at the combined results for the first phase (day 0 to day 7):
+```{r  results="hide"}
+for (param in c("m1", "c1")){
+  plot_all_fits(fits = c("E. coli" = ecoli_fit, 
+                       "Enterococci" = enterococci_fit, 
+                       "Coliforms" = coliform_fit), 
+                param=param,
+                condition_names = ecoli_data$treatment)
+}
+```
+From these figures, we can make a few assertions. In this initial phase
+- In this initial phase
+
+
+### Days 7 -- 28 
+
+```{r  results="hide"}
 for (param in c("m1", "c1", "m2", "c2")){
   plot_all_fits(fits = c("E. coli" = ecoli_fit, 
                        "Enterococci" = enterococci_fit, 
@@ -375,7 +399,6 @@ for (param in c("m1", "c1", "m2", "c2")){
                 condition_names = ecoli_data$treatment)
 }
 ```
-
 
 
 
