@@ -30,7 +30,7 @@ datafile="../data/processed/aggregated_clean_summarized.csv"
 
 ## Introduction
 
-To analyse the Faecal Indicator Organism (FIO) levels under the effect of various treatments (10L/50mL vessels; pasteurised/unpasteurised; pre-pasteurisation; post-pasteurisation) we use piecewise linear regression to estimate the rate of FIO loss at two stages of fermentation: "early" and "late". We pool the estimated parameters, assuming that each is drawn from a single distribution that applies to the bacterial family.
+To analyse the Fecal Indicator Organism (FIO) levels under the effect of various treatments (10L/50mL vessels; pasteurised/unpasteurised; pre-pasteurisation; post-pasteurisation) we use piecewise linear regression to estimate the rate of FIO loss at two stages of fermentation: "early" and "late". We pool the estimated parameters, assuming that each is drawn from a single distribution that applies to the bacterial family.
 
 ### Piecewise linear regression
 
@@ -234,7 +234,7 @@ summary_coliform = summary(coliform_fit, pars=c("m1", "c1", "m2", "c2",
 summary_coliform$summary
 ```
 
-#### Interpretation
+#### Plots
 
 This can be visualised graphically, showing 80% (red, filled area) and 95% (distribution ends) CIs:
 
@@ -292,7 +292,7 @@ summary_ecoli$summary
 basic_fit_plots(fit=ecoli_fit, condition_names = ecoli_data$treatment, ignored_params = c("lp__", "y_hat", grep("mu", ecoli_fit@model_pars, value = T), grep("sigma", ecoli_fit@model_pars, value = T)))
 ```
 
-#### Interpretation
+#### Plots
 
 ```{r}
 # Plot the early stage slopes
@@ -346,7 +346,7 @@ summary_enterococci$summary
 ```
 
 
-#### Interpretation
+#### Plots
 
 ```{r}
 # Plot the early stage slopes
@@ -371,11 +371,13 @@ plot(enterococci_fit, pars=c("c2"), show_density=TRUE)
 
 ## Interpretation
 As a reminder, we have two main research questions: 
+
 1. Are die-off rates similar between the 10L and 50ml reactors?  
 2. Do any of the 4 pasteurization schemes have an effect on die-off?
+
 ### Days 0 -- 7 
 Lets start by looking at the combined results for the first phase (day 0 to day 7):
-```{r  results="hide"}
+```{r  results="hide", message=FALSE, warning=FALSE}
 for (param in c("m1", "c1")){
   plot_all_fits(fits = c("E. coli" = ecoli_fit, 
                        "Enterococci" = enterococci_fit, 
@@ -384,22 +386,22 @@ for (param in c("m1", "c1")){
                 condition_names = ecoli_data$treatment)
 }
 ```
+
 From these figures, we can make a few assertions about this initial phase.
+
 - There is no difference in the rate or the intercept between the 10L condition and the 50ml (unpasteurized) from days 0-7.  
-- There is no difference between the rate of die-off in either pre-pasteruoization conditions
-- Both pre-pasteruization conditions show ~1 log lower *E. coli* counts than the other contitions, but no change in the other two FIO.
-- There appears to be a slight decrease in starting coliforms in the P4 post-pasteurized condition, but as the 95% CIs overlap with the 10L reactors, we cannot confirm that this difference is relavent.
-- The P3 post-pasteurization treatment appears to have a decreased rate of dieoff of E. coli and coliforms.
+- There is no difference between the rate of die-off in either pre-pasteurization conditions
+- Both pre-pasteurization conditions show about 1 log lower *E. coli* counts than the other conditions, but no change in the other two FIO.
+- There appears to be a slight decrease in starting coliforms in the P4 post-pasteurized condition, but as the 95% CIs overlap with the 10L reactors, we cannot confirm that this difference is relevant.
+- The P3 post-pasteurization treatment appears to have a decreased rate of die-off of E. coli and coliforms.
 -  There is no rate difference for P4.
 
-From this, we can confirm that there is no difference in die-off between the 50ml batches and the 10L lab-scale bioreactors.  Pre and Post-pasteurization does not effect alll FIO equally; prepasteurization  
-
-
-
+From this, we can confirm that there is no difference in die-off between the 50ml batches and the 10L lab-scale bioreactors.  Pre and Post-pasteurization does not effect all FIO equally; pre-pasteurization appears to effect initial *E. coli* counts negatively, though the rate of decline is ok; *Enterococci* and Coliforms are unaffected by pre-pasteurization.  Post-pasteurization condition P3 shows statistically decreased rate of *E. coli* and Coliform die-off.
+ 
 
 ### Days 7 -- 28 
 Now lets plot the results for the late stage, from day 7 - day 28
-```{r  results="hide"}
+```{r  results="hide", message=FALSE, warning=FALSE}
 for (param in c("m2", "c2")){
   plot_all_fits(fits = c("E. coli" = ecoli_fit, 
                        "Enterococci" = enterococci_fit, 
@@ -410,11 +412,12 @@ for (param in c("m2", "c2")){
 ```
 
 We can conclude the following:
+
 - There is no difference in the rate or the intercept between the 10L condition and the 50ml (unpasteurized) from days 7-28.  
 - For E. coli and the coliforms, the slope's CIs include 0.  Thus, we can conclude there is essentially no change after day 7.  The 10L E. coli rate does not include 0, indicating that there is a slight reduction of E. coli over time. 
-- Enterococci decreases slightly over time, euqlally across all the conditions.
-- Post pasteurization shows a significantly lower intercept comparing coliform unpasterized conditions to the post-pasteurized treatments.  This trend was similar for the other FIO, but not significant.  
-- Pre-pasteurization apears to have no effect on the intercept.
+- Enterococci decreases slightly over time, equally across all the conditions.
+- Post pasteurization shows a significantly lower intercept comparing coliform unpasteurized conditions to the post-pasteurized treatments.  This trend was similar for the other FIO, but not significant.  
+- Pre-pasteurization appears to have no effect on the intercept.
 
 
 

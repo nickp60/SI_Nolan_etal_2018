@@ -5,6 +5,11 @@ author: "Nick Waters"
 date: "30/01/2018"
 output: 
   html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 4
+    theme: simplex
+    highlight: tango
 editor_options: 
   chunk_output_type: console
 ---
@@ -16,20 +21,6 @@ library(ggplot2)
 library(reshape2)
 knitr::opts_chunk$set(echo = TRUE)
 ```
-# Data Fix Checklist
-Through this sanity checking, we discovered some minor errors in calculations that need to be corrected in the Plots, Discussion, etc:
-
-## Methane
-- Combined methane percent (fix wrong values being averaged)
-- Decide whether to average at the partial level or at the techrep level
-
-## CFUs
-- fix rounding errors when averaging and converting to/from log scale
-- fix E coli averaging errors at day 0
-
-## COD
-- find where the $*4000$ term comes from in the calculations
-
 
 # clean data
 Here are the paths to the cleaned data:
@@ -133,7 +124,7 @@ ch4_summary <- summarize_process_data(
   value_col = "weighted_ch4_percent",  
   measure="CH4",
   sanity_col="combined_methane_percent", sanity_threshold=1.5 )
-print(ch4_summary$wierdos)
+#print(ch4_summary$wierdos)
 ```
 We have a calculated things slightly differently than previously.  The old method was to average the technical replicates per partial reading per biological replicate, calculate the volume/percent/ etc for the partial readings , average across biological replicates.  Here, we calculate the percentage/volume for each technical replicate (ie techrep 1 for partialA, partialB,partialC), and generate a technical replicate  weighted.  I think this is more accurate as it both combines the partial readings at a stage where we do not lose the technical replication.
 
